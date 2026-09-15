@@ -1,0 +1,52 @@
+// ============================================================
+// A148 — SCHEMA-ÄNDERUNGEN (Einbau-Anleitung)
+// ============================================================
+
+// SCHRITT 1: Im bestehenden "model Artikel {" Block, NACH der Zeile
+//   status             ArtikelStatus @default(AKTIV)
+// folgende zwei Zeilen einfügen (NICHT den ganzen Block ersetzen):
+
+  mindestbestand     Decimal? @db.Decimal(12, 3) // A148: Schwellenwert für Bestellvorschlag. NULL = kein Schwellenwert definiert, Artikel wird im Bestellvorschlag ignoriert.
+  lagerrelevant      Boolean  @default(true)     // A148: false = Artikel wird nie im Bestellvorschlag berücksichtigt (z.B. Dienstleistungen)
+
+// SCHRITT 2: Im bestehenden "model Artikel {" Block, bei den Relationen
+// (dort wo z.B. "bundleBestandteile BundlePosition[] @relation("BundleTeile")"
+// steht), folgende Zeile ergänzen:
+
+  artikelLieferanten ArtikelLieferant[]
+
+// SCHRITT 3: Im bestehenden "model Partner {" Block, bei den Relationen
+// (Partner hat noch keine Relationen-Liste am Ende — direkt vor der
+// schließenden "}" des Partner-Modells einfügen):
+
+  artikelLieferanten ArtikelLieferant[]
+
+// SCHRITT 4: Komplett NEUES Modell, irgendwo nach "model Artikel" und vor
+// "model Konto" einfügen (z.B. direkt nach dem bestehenden
+// Konfigurationsregel-Modell):
+
+// ---------------------------------------------------------------
+// A148 — ARTIKEL-LIEFERANT: mehrere Bezugsquellen pro Artikel,
+// mit Priorität (1 = Hauptlieferant) und freien Konditionen-Notizen.
+// ---------------------------------------------------------------
+model ArtikelLieferant {
+  id                 String   @id @default(uuid())
+  lizenznehmerId     String   // redundant mitgeführt für RLS (siehe 3.6)
+
+  artikelId          String
+  artikel            Artikel  @relation(fields: [artikelId], references: [id])
+
+  lieferantId        String   // Partner mit typ = LIEFERANT oder BEIDES
+  lieferant          Partner  @relation(fields: [lieferantId], references: [id])
+
+  prioritaet         Int      // 1 = Hauptlieferant, 2 = zweite Bezugsquelle, usw.
+  einkaufspreis      Decimal  @db.Decimal(12, 2)
+  mindestbestellmenge Decimal? @db.Decimal(12, 3)
+  bemerkung          String?  // Freitext: Gebinde, Zahlungsziel, Servicequalität etc.
+
+  erstelltAm         DateTime @default(now())
+
+  @@index([lizenznehmerId])
+  @@index([artikelId])
+  @@map("artikel_lieferant")
+}

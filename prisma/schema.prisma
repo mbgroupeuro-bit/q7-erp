@@ -1,0 +1,654 @@
+// Q7-ERP Kern-Datenmodell — Phase 1
+// Multi-Tenancy: Option A (geteilte Tabellen), abgesichert über lizenznehmer_id
+// + PostgreSQL Row-Level Security (RLS-Policies separat als SQL-Migration anzulegen)
+// Primärschlüssel: UUID v7/ULID vorgesehen (Admin-Entscheidung) — Prisma unterstützt
+// v7 nicht nativ über @default(uuid()); Generierung erfolgt aktuell anwendungsseitig
+// (z.B. via "uuidv7"-Paket in der Service-Schicht) oder per DB-Default/Extension.
+// Platzhalter unten: @default(uuid()) erzeugt Standard-v4 — vor Produktivbetrieb ersetzen.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------
+// LIZENZNEHMER (Wurzel-Tabelle, keine eigene lizenznehmer_id nötig)
+// ---------------------------------------------------------------
+model Lizenznehmer {
+  id             String      @id @default(uuid())
+  name           String
+  rechtsform     String?
+  adresseStrasse String?
+  adressePlz     String?
+  adresseOrt     String?
+  adresseLand    String?
+  steuernummer   String?
+  ustId          String?
+  lizenzstufe    Lizenzstufe @default(SMALL)
+  status         Status      @default(AKTIV)
+  erstelltAm     DateTime    @default(now())
+  aktualisiertAm DateTime    @updatedAt
+
+  partner          Partner[]
+  artikel          Artikel[]
+  konten           Konto[]
+  benutzer         Benutzer[]
+  zugriffshistorie Zugriffshistorie[]
+  q7Verbindung     Q7Verbindung?
+  sicherheitsEmail String?
+
+  lagerorte       Lagerort[]
+  lagerbestaende  Lagerbestand[]
+  lagerbewegungen Lagerbewegung[]
+
+  crmKontakte       CrmKontakt[]
+  crmAktivitaeten   CrmAktivitaet[]
+  crmWiedervorlagen CrmWiedervorlage[]
+  crmAngebote       CrmAngebot[]
+
+  mitarbeiter Mitarbeiter[]
+  arbeitstage Arbeitstag[]
+  vorschuesse Vorschuss[]
+
+  @@map("lizenznehmer")
+}
+
+enum Lizenzstufe {
+  SMALL
+  MEDIUM
+  ENTERPRISE
+}
+
+enum Status {
+  AKTIV
+  INAKTIV
+}
+
+// ---------------------------------------------------------------
+// BENUTZER (Login für Auth-Modul, JWT enthält lizenznehmerId)
+// ---------------------------------------------------------------
+model Benutzer {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  email        String @unique
+  passwortHash String
+
+  istSystemAdmin Boolean @default(false) // NEU — Aufgabe 26: Admin-Guard für LizenznehmerController
+
+  status     Status   @default(AKTIV)
+  erstelltAm DateTime @default(now())
+
+  @@index([lizenznehmerId])
+  @@map("benutzer")
+}
+
+// ---------------------------------------------------------------
+// PARTNER (Kunden & Lieferanten des Lizenznehmer-Betriebs)
+// ---------------------------------------------------------------
+model Partner {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  typ              PartnerTyp
+  name             String
+  ansprechpartner  String?
+  adresseStrasse   String?
+  adressePlz       String?
+  adresseOrt       String?
+  adresseLand      String?
+  email            String?
+  telefon          String?
+  steuernummer     String?
+  ustId            String?
+  zahlungszielTage Int?       @default(30)
+  status           Status     @default(AKTIV)
+  erstelltAm       DateTime   @default(now())
+
+  crmKontakte CrmKontakt[]
+  artikelLieferanten ArtikelLieferant[]
+
+  @@index([lizenznehmerId])
+  @@map("partner")
+}
+
+enum PartnerTyp {
+  KUNDE
+  LIEFERANT
+  BEIDES
+}
+
+// ---------------------------------------------------------------
+// ARTIKEL — Kern (Stufe 1) + Verweise auf Erweiterungsstufen
+// ---------------------------------------------------------------
+model Artikel {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  artikelnummer String
+  name          String
+  beschreibung  String?
+  grundpreis    Decimal @db.Decimal(12, 2)
+  einheit       String
+
+  elternArtikelId String? // gesetzt bei Varianten (Stufe 2)
+  elternArtikel   Artikel?  @relation("Varianten", fields: [elternArtikelId], references: [id])
+  varianten       Artikel[] @relation("Varianten")
+
+  istBundle         Boolean @default(false) // Stufe 3
+  istKonfigurierbar Boolean @default(false) // Stufe 4
+
+  status     ArtikelStatus @default(AKTIV)
+  mindestbestand     Decimal? @db.Decimal(12, 3) // A148: Schwellenwert für Bestellvorschlag. NULL = kein Schwellenwert definiert, Artikel wird im Bestellvorschlag ignoriert.
+  lagerrelevant      Boolean  @default(true)     // A148: false = Artikel wird nie im Bestellvorschlag berücksichtigt (z.B. Dienstleistungen)
+  erstelltAm DateTime      @default(now())
+
+  merkmale           ArtikelMerkmal[]
+  bundleBestandteile BundlePosition[] @relation("BundleTeile")
+  istTeilVonBundle   BundlePosition[] @relation("BestandteilVon")
+  bausteinGruppen    BausteinGruppe[]
+
+  lagerbestaende  Lagerbestand[]
+  lagerbewegungen Lagerbewegung[]
+
+  crmAngebotPositionen CrmAngebotPosition[]
+
+  artikelLieferanten ArtikelLieferant[]
+
+  @@index([lizenznehmerId])
+  @@map("artikel")
+}
+
+enum ArtikelStatus {
+  AKTIV
+  INAKTIV
+  AUSLAUFEND
+}
+
+// ---------------------------------------------------------------
+// STUFE 2 — VARIANTEN: Merkmale je Variante
+// ---------------------------------------------------------------
+model ArtikelMerkmal {
+  id             String  @id @default(uuid())
+  lizenznehmerId String // redundant mitgeführt für RLS (siehe 3.6)
+  artikelId      String
+  artikel        Artikel @relation(fields: [artikelId], references: [id])
+
+  merkmalName String // z.B. "Farbe"
+  merkmalWert String // z.B. "Rot"
+
+  @@index([lizenznehmerId])
+  @@map("artikel_merkmal")
+}
+
+// ---------------------------------------------------------------
+// STUFE 3 — BUNDLE: Stückliste
+// ---------------------------------------------------------------
+model BundlePosition {
+  id             String @id @default(uuid())
+  lizenznehmerId String // redundant mitgeführt für RLS
+
+  bundleArtikelId String
+  bundleArtikel   Artikel @relation("BundleTeile", fields: [bundleArtikelId], references: [id])
+
+  bestandteilArtikelId String
+  bestandteilArtikel   Artikel @relation("BestandteilVon", fields: [bestandteilArtikelId], references: [id])
+
+  menge Decimal @db.Decimal(10, 2)
+
+  @@index([lizenznehmerId])
+  @@map("bundle_position")
+}
+
+// ---------------------------------------------------------------
+// STUFE 4 — KONFIGURATION: Baustein-Gruppen, Optionen, Regeln
+// ---------------------------------------------------------------
+model BausteinGruppe {
+  id             String  @id @default(uuid())
+  lizenznehmerId String // redundant mitgeführt für RLS
+  artikelId      String
+  artikel        Artikel @relation(fields: [artikelId], references: [id])
+
+  gruppenName String // z.B. "Breite"
+  pflichtfeld Boolean @default(true)
+
+  optionen BausteinOption[]
+
+  @@index([lizenznehmerId])
+  @@map("baustein_gruppe")
+}
+
+model BausteinOption {
+  id             String         @id @default(uuid())
+  lizenznehmerId String // redundant mitgeführt für RLS
+  gruppeId       String
+  gruppe         BausteinGruppe @relation(fields: [gruppeId], references: [id])
+
+  optionsName    String
+  preisaufschlag Decimal @default(0) @db.Decimal(12, 2)
+
+  @@index([lizenznehmerId])
+  @@map("baustein_option")
+}
+
+model Konfigurationsregel {
+  id                     String @id @default(uuid())
+  lizenznehmerId         String // redundant mitgeführt für RLS
+  wennOptionId           String
+  dannAusschlussOptionId String
+
+  @@index([lizenznehmerId])
+  @@map("konfigurationsregel")
+}
+
+// ---------------------------------------------------------------
+// A148 — ARTIKEL-LIEFERANT: mehrere Bezugsquellen pro Artikel,
+// mit Priorität (1 = Hauptlieferant) und freien Konditionen-Notizen.
+// ---------------------------------------------------------------
+model ArtikelLieferant {
+  id                 String   @id @default(uuid())
+  lizenznehmerId     String   // redundant mitgeführt für RLS (siehe 3.6)
+
+  artikelId          String
+  artikel            Artikel  @relation(fields: [artikelId], references: [id])
+
+  lieferantId        String   // Partner mit typ = LIEFERANT oder BEIDES
+  lieferant          Partner  @relation(fields: [lieferantId], references: [id])
+
+  prioritaet         Int      // 1 = Hauptlieferant, 2 = zweite Bezugsquelle, usw.
+  einkaufspreis      Decimal  @db.Decimal(12, 2)
+  mindestbestellmenge Decimal? @db.Decimal(12, 3)
+  bemerkung          String?  // Freitext: Gebinde, Zahlungsziel, Servicequalität etc.
+
+  erstelltAm         DateTime @default(now())
+
+  @@index([lizenznehmerId])
+  @@index([artikelId])
+  @@map("artikel_lieferant")
+}
+
+// ---------------------------------------------------------------
+// KONTEN — Basis-Kontenrahmen (Stammdaten für spätere Buchhaltung)
+// ---------------------------------------------------------------
+model Konto {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  kontonummer String
+  bezeichnung String
+  kontotyp    Kontotyp
+  status      Status   @default(AKTIV)
+
+  @@index([lizenznehmerId])
+  @@map("konten")
+}
+
+enum Kontotyp {
+  AKTIV_KONTO
+  PASSIV_KONTO
+  ERTRAG
+  AUFWAND
+}
+
+// ---------------------------------------------------------------
+// ERP-TÜRSTEHER — Zugriffshistorie + Q7-Verbindung (Signaturprüfung)
+// ---------------------------------------------------------------
+model Zugriffshistorie {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  ipAdresse String
+  quelle    String
+  anfrageId String   @unique
+  zeitpunkt DateTime @default(now())
+
+  ergebnis TuersteherErgebnis
+  grund    String?
+
+  @@index([lizenznehmerId, zeitpunkt])
+  @@index([lizenznehmerId, ipAdresse])
+  @@map("zugriffshistorie")
+}
+
+enum TuersteherErgebnis {
+  ERLAUBT
+  BLOCKIERT
+  VERDAECHTIG_ERLAUBT_MIT_BENACHRICHTIGUNG
+}
+
+model Q7Verbindung {
+  id             String       @id @default(uuid())
+  lizenznehmerId String       @unique
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  geteiltesGeheimnis String
+  webhookUrl         String? // NEU (A74) — Ziel-URL für ausgehende Events an Q7.
+  // Optional (String?), da eine Q7-Verbindung ohne
+  // Webhook-Ziel weiterhin für den EINGEHENDEN Weg
+  // (Q7 → Q7-ERP, A69/A70) gültig bleiben kann.
+  aktiv              Boolean  @default(true)
+  erstelltAm         DateTime @default(now())
+  letzteRotation     DateTime @default(now())
+
+  @@map("q7_verbindung")
+}
+
+// ---------------------------------------------------------------
+// LAGER — Etappe 3 (Phase 2): Lagerort, Bestand, Bewegungshistorie
+// Von Anfang an mit Lagerort-Bezug (Admin-Entscheidung, A46/A47):
+// vermeidet aufwändigen Umbau, falls später mehrere Standorte
+// (z.B. Filialen) hinzukommen. Aktuell reicht ein Lagerort mit
+// istStandard = true pro Lizenznehmer.
+// ---------------------------------------------------------------
+model Lagerort {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  name        String // z.B. "Hauptlager"
+  istStandard Boolean  @default(false) // genau ein Lagerort pro Lizenznehmer sollte true sein
+  status      Status   @default(AKTIV)
+  erstelltAm  DateTime @default(now())
+
+  lagerbestaende  Lagerbestand[]
+  lagerbewegungen Lagerbewegung[]
+
+  @@index([lizenznehmerId])
+  @@map("lagerort")
+}
+
+// Aktueller Bestand je Artikel + Lagerort — schneller Lesezugriff,
+// wird bei jeder Buchung zusammen mit einem Lagerbewegung-Eintrag
+// in derselben Transaktion aktualisiert (siehe A51/A53/A56).
+model Lagerbestand {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  artikelId String
+  artikel   Artikel @relation(fields: [artikelId], references: [id])
+
+  lagerortId String
+  lagerort   Lagerort @relation(fields: [lagerortId], references: [id])
+
+  menge          Decimal  @db.Decimal(12, 3)
+  aktualisiertAm DateTime @updatedAt
+
+  @@unique([artikelId, lagerortId])
+  @@index([lizenznehmerId])
+  @@map("lagerbestand")
+}
+
+// Historie aller Bestandsbewegungen — Nachvollziehbarkeit/Inventur.
+model Lagerbewegung {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  artikelId String
+  artikel   Artikel @relation(fields: [artikelId], references: [id])
+
+  lagerortId String
+  lagerort   Lagerort @relation(fields: [lagerortId], references: [id])
+
+  typ        LagerbewegungTyp
+  menge      Decimal          @db.Decimal(12, 3) // immer positiv; Vorzeichen/Richtung ergibt sich ausschließlich aus "typ"
+  referenz   String? // z.B. Beleg-Nr., Bundle-Verkauf-ID
+  bemerkung  String?
+  erstelltAm DateTime         @default(now())
+
+  @@index([lizenznehmerId])
+  @@index([artikelId, lagerortId])
+  @@map("lagerbewegung")
+}
+
+// A56 (Grill-Me-Entscheidung, 15.08.2026): KORREKTUR ersetzt durch zwei
+// gerichtete Werte statt einer Vorzeichen-Ausnahme bei "menge" — hält
+// "menge immer positiv"-Prinzip konsistent für künftiges Reporting
+// (siehe Master-Dokument Abschnitt 8, Punkt 5: Ad-hoc-Auswertungen).
+enum LagerbewegungTyp {
+  WARENEINGANG
+  WARENAUSGANG
+  KORREKTUR_AUFWAERTS
+  KORREKTUR_ABWAERTS
+  BUNDLE_ABBUCHUNG
+}
+
+// ---------------------------------------------------------------
+// CRM — Block B (A121): Kontakt/Lead
+// ---------------------------------------------------------------
+model CrmKontakt {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  name    String
+  email   String?
+  telefon String?
+
+  partnerId String?
+  partner   Partner? @relation(fields: [partnerId], references: [id])
+
+  pipelineStatus CrmPipelineStatus @default(NEU)
+  quelle         String?
+
+  status         Status   @default(AKTIV)
+  erstelltAm     DateTime @default(now())
+  aktualisiertAm DateTime @updatedAt
+
+  aktivitaeten   CrmAktivitaet[]
+  wiedervorlagen CrmWiedervorlage[]
+  angebote       CrmAngebot[]
+
+  @@index([lizenznehmerId])
+  @@map("crm_kontakt")
+}
+
+enum CrmPipelineStatus {
+  NEU
+  KONTAKTIERT
+  ANGEBOT
+  GEWONNEN
+  VERLOREN
+}
+
+// ---------------------------------------------------------------
+// CRM — Block B (A125): Aktivitäten/Notizen
+// ---------------------------------------------------------------
+model CrmAktivitaet {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  crmKontaktId String
+  crmKontakt   CrmKontakt @relation(fields: [crmKontaktId], references: [id])
+
+  text String
+
+  erstelltAm DateTime @default(now())
+
+  @@index([lizenznehmerId])
+  @@index([crmKontaktId])
+  @@map("crm_aktivitaet")
+}
+
+// ---------------------------------------------------------------
+// CRM — Block B (A126): Wiedervorlagen/Aufgaben
+// ---------------------------------------------------------------
+model CrmWiedervorlage {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  crmKontaktId String
+  crmKontakt   CrmKontakt @relation(fields: [crmKontaktId], references: [id])
+
+  text              String
+  faelligkeitsDatum DateTime
+  erledigt          Boolean  @default(false)
+
+  erstelltAm     DateTime @default(now())
+  aktualisiertAm DateTime @updatedAt
+
+  @@index([lizenznehmerId])
+  @@index([crmKontaktId])
+  @@map("crm_wiedervorlage")
+}
+
+// ---------------------------------------------------------------
+// CRM — Block B (A128): Angebote/Deals
+// ---------------------------------------------------------------
+model CrmAngebot {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  crmKontaktId String
+  crmKontakt   CrmKontakt @relation(fields: [crmKontaktId], references: [id])
+
+  status     CrmAngebotStatus @default(ENTWURF)
+  gueltigBis DateTime?
+
+  positionen CrmAngebotPosition[]
+
+  erstelltAm     DateTime @default(now())
+  aktualisiertAm DateTime @updatedAt
+
+  @@index([lizenznehmerId])
+  @@index([crmKontaktId])
+  @@map("crm_angebot")
+}
+
+enum CrmAngebotStatus {
+  ENTWURF
+  VERSENDET
+  ANGENOMMEN
+  ABGELEHNT
+}
+
+model CrmAngebotPosition {
+  id             String @id @default(uuid())
+  lizenznehmerId String // redundant mitgeführt für RLS (siehe 3.6)
+
+  crmAngebotId String
+  crmAngebot   CrmAngebot @relation(fields: [crmAngebotId], references: [id])
+
+  artikelId String
+  artikel   Artikel @relation(fields: [artikelId], references: [id])
+
+  menge Decimal @db.Decimal(12, 3)
+
+  einzelpreis Decimal @db.Decimal(12, 2)
+
+  @@index([lizenznehmerId])
+  @@index([crmAngebotId])
+  @@map("crm_angebot_position")
+}
+
+// ---------------------------------------------------------------
+// HR — Block C (A134): Mitarbeiter-Stammdaten
+// GEÄNDERT (Admin-Entscheidung, 26.08.2026): einzelnes "gehalt"-Feld
+// ersetzt durch Vergütungsart + Betrag + optionale Provision.
+// - verguetungsArt: TAGESLOHN oder MONATSGEHALT — GENAU EINE Basis-Art
+//   pro Mitarbeiter (kein gleichzeitiges Sowohl-als-auch).
+// - verguetungsBetrag: der zugehörige Betrag (Tagessatz ODER
+//   Monatsgehalt, je nach verguetungsArt).
+// - provisionBetrag: OPTIONAL zusätzlich zur Basis-Art. Bewusst als
+//   reines Betragsfeld OHNE Berechnungslogik (Admin-Entscheidung,
+//   26.08.2026) — keine Prozent-/Umsatzkopplung im System, kann bei
+//   Bedarf später als Erweiterung ergänzt werden (3.4).
+// Beide Felder bleiben reine Referenzwerte — KEINE Berechnungslogik
+// im System (Payroll-Klärung, Master-Dokument Abschnitt 6, Punkt 1:
+// volle Lohn-/Gehaltsabrechnung gehört nicht ins Q7-ERP).
+// Währung: Marokkanischer Dirham (DH) — nur Anzeige-Konvention im
+// Frontend, kein eigenes Währungsfeld in der Datenbank nötig, da
+// Q7-ERP aktuell nur für einen Standort/eine Währung ausgelegt ist.
+// ---------------------------------------------------------------
+model Mitarbeiter {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  name    String
+  telefon String?
+
+  verguetungsArt    VerguetungsArt
+  verguetungsBetrag Decimal        @db.Decimal(12, 2)
+  provisionBetrag   Decimal?       @db.Decimal(12, 2)
+
+  status         Status   @default(AKTIV)
+  erstelltAm     DateTime @default(now())
+  aktualisiertAm DateTime @updatedAt
+
+  arbeitstage Arbeitstag[]
+  vorschuesse Vorschuss[]
+
+  @@index([lizenznehmerId])
+  @@map("mitarbeiter")
+}
+
+enum VerguetungsArt {
+  TAGESLOHN
+  MONATSGEHALT
+}
+
+// ---------------------------------------------------------------
+// HR — Block C (A138): Zeiterfassung (Arbeitstage)
+// GEÄNDERT (A147, 27.08.2026): Feld "gearbeitet" ergänzt — bisher
+// bedeutete "Eintrag existiert" automatisch "gearbeitet". Für den
+// Anwendungsfall "Fehltag dokumentieren" (z.B. Mitarbeiter nicht
+// auf der Baustelle erschienen) muss das explizit als eigener
+// Eintrag mit gearbeitet=false erfasst werden können — sonst wäre
+// ein Fehltag nicht von "noch keine Meldung erhalten" unterscheidbar.
+// Default true, damit bestehende Alt-Einträge (vor A147) korrekt
+// als "gearbeitet" interpretiert werden.
+// ---------------------------------------------------------------
+model Arbeitstag {
+  id             String       @id @default(uuid())
+  lizenznehmerId String // redundant mitgeführt für RLS (siehe 3.6)
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  mitarbeiterId String
+  mitarbeiter   Mitarbeiter @relation(fields: [mitarbeiterId], references: [id])
+
+  datum      DateTime @db.Date
+  gearbeitet Boolean  @default(true) // NEU (A147): true = Häkchen, false = X (Fehltag)
+  bemerkung  String?
+
+  erstelltAm DateTime @default(now())
+
+  @@unique([mitarbeiterId, datum])
+  @@index([lizenznehmerId])
+  @@index([mitarbeiterId])
+  @@map("arbeitstag")
+}
+
+// ---------------------------------------------------------------
+// HR — Block C (A140): Vorschuss-Erfassung
+// ---------------------------------------------------------------
+model Vorschuss {
+  id             String       @id @default(uuid())
+  lizenznehmerId String // redundant mitgeführt für RLS (siehe 3.6)
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  mitarbeiterId String
+  mitarbeiter   Mitarbeiter @relation(fields: [mitarbeiterId], references: [id])
+
+  betrag    Decimal  @db.Decimal(12, 2)
+  datum     DateTime @db.Date
+  bemerkung String?
+
+  erstelltAm DateTime @default(now())
+
+  @@index([lizenznehmerId])
+  @@index([mitarbeiterId])
+  @@map("vorschuss")
+}

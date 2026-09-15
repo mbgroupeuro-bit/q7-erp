@@ -1,0 +1,285 @@
+// Q7-ERP Kern-Datenmodell — Phase 1
+// Multi-Tenancy: Option A (geteilte Tabellen), abgesichert über lizenznehmer_id
+// + PostgreSQL Row-Level Security (RLS-Policies separat als SQL-Migration anzulegen)
+// Primärschlüssel: UUID v7/ULID vorgesehen (Admin-Entscheidung) — Prisma unterstützt
+// v7 nicht nativ über @default(uuid()); Generierung erfolgt aktuell anwendungsseitig
+// (z.B. via "uuidv7"-Paket in der Service-Schicht) oder per DB-Default/Extension.
+// Platzhalter unten: @default(uuid()) erzeugt Standard-v4 — vor Produktivbetrieb ersetzen.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------
+// LIZENZNEHMER (Wurzel-Tabelle, keine eigene lizenznehmer_id nötig)
+// ---------------------------------------------------------------
+model Lizenznehmer {
+  id              String   @id @default(uuid())
+  name            String
+  rechtsform      String?
+  adresseStrasse  String?
+  adressePlz      String?
+  adresseOrt      String?
+  adresseLand     String?
+  steuernummer    String?
+  ustId           String?
+  lizenzstufe     Lizenzstufe @default(SMALL)
+  status          Status      @default(AKTIV)
+  erstelltAm      DateTime    @default(now())
+  aktualisiertAm  DateTime    @updatedAt
+
+  partner         Partner[]
+  artikel         Artikel[]
+  konten          Konto[]
+  benutzer        Benutzer[]
+  zugriffshistorie Zugriffshistorie[]
+  q7Verbindung    Q7Verbindung?
+  sicherheitsEmail String?
+
+  @@map("lizenznehmer")
+}
+
+enum Lizenzstufe {
+  SMALL
+  MEDIUM
+  ENTERPRISE
+}
+
+enum Status {
+  AKTIV
+  INAKTIV
+}
+
+// ---------------------------------------------------------------
+// BENUTZER (Login für Auth-Modul, JWT enthält lizenznehmerId)
+// ---------------------------------------------------------------
+model Benutzer {
+  id             String   @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  email          String   @unique
+  passwortHash   String
+
+  status         Status   @default(AKTIV)
+  erstelltAm     DateTime @default(now())
+
+  @@index([lizenznehmerId])
+  @@map("benutzer")
+}
+
+// ---------------------------------------------------------------
+// PARTNER (Kunden & Lieferanten des Lizenznehmer-Betriebs)
+// ---------------------------------------------------------------
+model Partner {
+  id               String   @id @default(uuid())
+  lizenznehmerId   String
+  lizenznehmer     Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  typ              PartnerTyp
+  name             String
+  ansprechpartner  String?
+  adresseStrasse   String?
+  adressePlz       String?
+  adresseOrt       String?
+  adresseLand      String?
+  email            String?
+  telefon          String?
+  steuernummer     String?
+  ustId            String?
+  zahlungszielTage Int?     @default(30)
+  status           Status   @default(AKTIV)
+  erstelltAm       DateTime @default(now())
+
+  @@index([lizenznehmerId])
+  @@map("partner")
+}
+
+enum PartnerTyp {
+  KUNDE
+  LIEFERANT
+  BEIDES
+}
+
+// ---------------------------------------------------------------
+// ARTIKEL — Kern (Stufe 1) + Verweise auf Erweiterungsstufen
+// ---------------------------------------------------------------
+model Artikel {
+  id                 String   @id @default(uuid())
+  lizenznehmerId     String
+  lizenznehmer       Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  artikelnummer      String
+  name               String
+  beschreibung       String?
+  grundpreis         Decimal  @db.Decimal(12, 2)
+  einheit            String
+
+  elternArtikelId    String?  // gesetzt bei Varianten (Stufe 2)
+  elternArtikel      Artikel? @relation("Varianten", fields: [elternArtikelId], references: [id])
+  varianten          Artikel[] @relation("Varianten")
+
+  istBundle          Boolean  @default(false)  // Stufe 3
+  istKonfigurierbar  Boolean  @default(false)  // Stufe 4
+
+  status             ArtikelStatus @default(AKTIV)
+  erstelltAm         DateTime @default(now())
+
+  merkmale           ArtikelMerkmal[]
+  bundleBestandteile BundlePosition[] @relation("BundleTeile")
+  istTeilVonBundle   BundlePosition[] @relation("BestandteilVon")
+  bausteinGruppen    BausteinGruppe[]
+
+  @@index([lizenznehmerId])
+  @@map("artikel")
+}
+
+enum ArtikelStatus {
+  AKTIV
+  INAKTIV
+  AUSLAUFEND
+}
+
+// ---------------------------------------------------------------
+// STUFE 2 — VARIANTEN: Merkmale je Variante
+// ---------------------------------------------------------------
+model ArtikelMerkmal {
+  id             String   @id @default(uuid())
+  lizenznehmerId String   // redundant mitgeführt für RLS (siehe 3.6)
+  artikelId      String
+  artikel        Artikel  @relation(fields: [artikelId], references: [id])
+
+  merkmalName    String   // z.B. "Farbe"
+  merkmalWert    String   // z.B. "Rot"
+
+  @@index([lizenznehmerId])
+  @@map("artikel_merkmal")
+}
+
+// ---------------------------------------------------------------
+// STUFE 3 — BUNDLE: Stückliste
+// ---------------------------------------------------------------
+model BundlePosition {
+  id                  String  @id @default(uuid())
+  lizenznehmerId      String  // redundant mitgeführt für RLS
+
+  bundleArtikelId     String
+  bundleArtikel       Artikel @relation("BundleTeile", fields: [bundleArtikelId], references: [id])
+
+  bestandteilArtikelId String
+  bestandteilArtikel   Artikel @relation("BestandteilVon", fields: [bestandteilArtikelId], references: [id])
+
+  menge               Decimal @db.Decimal(10, 2)
+
+  @@index([lizenznehmerId])
+  @@map("bundle_position")
+}
+
+// ---------------------------------------------------------------
+// STUFE 4 — KONFIGURATION: Baustein-Gruppen, Optionen, Regeln
+// ---------------------------------------------------------------
+model BausteinGruppe {
+  id             String   @id @default(uuid())
+  lizenznehmerId String   // redundant mitgeführt für RLS
+  artikelId      String
+  artikel        Artikel  @relation(fields: [artikelId], references: [id])
+
+  gruppenName    String   // z.B. "Breite"
+  pflichtfeld    Boolean  @default(true)
+
+  optionen       BausteinOption[]
+
+  @@index([lizenznehmerId])
+  @@map("baustein_gruppe")
+}
+
+model BausteinOption {
+  id              String   @id @default(uuid())
+  lizenznehmerId  String   // redundant mitgeführt für RLS
+  gruppeId        String
+  gruppe          BausteinGruppe @relation(fields: [gruppeId], references: [id])
+
+  optionsName     String
+  preisaufschlag  Decimal  @default(0) @db.Decimal(12, 2)
+
+  @@index([lizenznehmerId])
+  @@map("baustein_option")
+}
+
+model Konfigurationsregel {
+  id                        String @id @default(uuid())
+  lizenznehmerId            String // redundant mitgeführt für RLS
+  wennOptionId              String
+  dannAusschlussOptionId    String
+
+  @@index([lizenznehmerId])
+  @@map("konfigurationsregel")
+}
+
+// ---------------------------------------------------------------
+// KONTEN — Basis-Kontenrahmen (Stammdaten für spätere Buchhaltung)
+// ---------------------------------------------------------------
+model Konto {
+  id             String   @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  kontonummer    String
+  bezeichnung    String
+  kontotyp       Kontotyp
+  status         Status   @default(AKTIV)
+
+  @@index([lizenznehmerId])
+  @@map("konten")
+}
+
+enum Kontotyp {
+  AKTIV_KONTO
+  PASSIV_KONTO
+  ERTRAG
+  AUFWAND
+}
+
+// ---------------------------------------------------------------
+// ERP-TÜRSTEHER — Zugriffshistorie + Q7-Verbindung (Signaturprüfung)
+// ---------------------------------------------------------------
+model Zugriffshistorie {
+  id             String   @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  ipAdresse      String
+  quelle         String
+  anfrageId      String   @unique
+  zeitpunkt      DateTime @default(now())
+
+  ergebnis       TuersteherErgebnis
+  grund          String?
+
+  @@index([lizenznehmerId, zeitpunkt])
+  @@index([lizenznehmerId, ipAdresse])
+  @@map("zugriffshistorie")
+}
+
+enum TuersteherErgebnis {
+  ERLAUBT
+  BLOCKIERT
+  VERDAECHTIG_ERLAUBT_MIT_BENACHRICHTIGUNG
+}
+
+model Q7Verbindung {
+  id                 String   @id @default(uuid())
+  lizenznehmerId     String   @unique
+  lizenznehmer       Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  geteiltesGeheimnis String
+  aktiv              Boolean  @default(true)
+  erstelltAm         DateTime @default(now())
+  letzteRotation     DateTime @default(now())
+
+  @@map("q7_verbindung")
+}
