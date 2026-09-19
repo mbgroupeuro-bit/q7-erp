@@ -53,6 +53,15 @@ model Lizenznehmer {
   arbeitstage Arbeitstag[]
   vorschuesse Vorschuss[]
 
+  // D02 (Block D E-Commerce/Fulfillment) — Modul-Aktivierung + Konfiguration
+  lizenznehmerModule      LizenznehmerModul[]
+  zahlungKonfigurationen  ZahlungKonfiguration[]
+  logistikKonfigurationen LogistikKonfiguration[]
+  shopKonfigurationen     ShopKonfiguration[]
+
+  // NEU (D04, Block D E-Commerce/Fulfillment) — Bestellungen
+  bestellungen Bestellung[]
+
   @@map("lizenznehmer")
 }
 
@@ -78,7 +87,7 @@ model Benutzer {
   email        String @unique
   passwortHash String
 
-  istSystemAdmin Boolean @default(false) // NEU — Aufgabe 26: Admin-Guard für LizenznehmerController
+  istSystemAdmin Boolean @default(false) // Aufgabe 26: Admin-Guard für LizenznehmerController
 
   status     Status   @default(AKTIV)
   erstelltAm DateTime @default(now())
@@ -160,6 +169,9 @@ model Artikel {
   crmAngebotPositionen CrmAngebotPosition[]
 
   artikelLieferanten ArtikelLieferant[]
+
+  // NEU (D04, Block D E-Commerce/Fulfillment)
+  bestellPositionen BestellPosition[]
 
   @@index([lizenznehmerId])
   @@map("artikel")
@@ -330,10 +342,7 @@ model Q7Verbindung {
   lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
 
   geteiltesGeheimnis String
-  webhookUrl         String? // NEU (A74) — Ziel-URL für ausgehende Events an Q7.
-  // Optional (String?), da eine Q7-Verbindung ohne
-  // Webhook-Ziel weiterhin für den EINGEHENDEN Weg
-  // (Q7 → Q7-ERP, A69/A70) gültig bleiben kann.
+  webhookUrl         String? // A74 — Ziel-URL für ausgehende Events an Q7.
   aktiv              Boolean  @default(true)
   erstelltAm         DateTime @default(now())
   letzteRotation     DateTime @default(now())
@@ -343,10 +352,6 @@ model Q7Verbindung {
 
 // ---------------------------------------------------------------
 // LAGER — Etappe 3 (Phase 2): Lagerort, Bestand, Bewegungshistorie
-// Von Anfang an mit Lagerort-Bezug (Admin-Entscheidung, A46/A47):
-// vermeidet aufwändigen Umbau, falls später mehrere Standorte
-// (z.B. Filialen) hinzukommen. Aktuell reicht ein Lagerort mit
-// istStandard = true pro Lizenznehmer.
 // ---------------------------------------------------------------
 model Lagerort {
   id             String       @id @default(uuid())
@@ -361,13 +366,13 @@ model Lagerort {
   lagerbestaende  Lagerbestand[]
   lagerbewegungen Lagerbewegung[]
 
+  // NEU (D04, Block D E-Commerce/Fulfillment)
+  bestellungen Bestellung[]
+
   @@index([lizenznehmerId])
   @@map("lagerort")
 }
 
-// Aktueller Bestand je Artikel + Lagerort — schneller Lesezugriff,
-// wird bei jeder Buchung zusammen mit einem Lagerbewegung-Eintrag
-// in derselben Transaktion aktualisiert (siehe A51/A53/A56).
 model Lagerbestand {
   id             String       @id @default(uuid())
   lizenznehmerId String
@@ -387,7 +392,6 @@ model Lagerbestand {
   @@map("lagerbestand")
 }
 
-// Historie aller Bestandsbewegungen — Nachvollziehbarkeit/Inventur.
 model Lagerbewegung {
   id             String       @id @default(uuid())
   lizenznehmerId String
@@ -401,7 +405,7 @@ model Lagerbewegung {
 
   typ        LagerbewegungTyp
   menge      Decimal          @db.Decimal(12, 3) // immer positiv; Vorzeichen/Richtung ergibt sich ausschließlich aus "typ"
-  referenz   String? // z.B. Beleg-Nr., Bundle-Verkauf-ID
+  referenz   String? // z.B. Beleg-Nr., Bundle-Verkauf-ID, künftig auch Bestellung-ID (D04)
   bemerkung  String?
   erstelltAm DateTime         @default(now())
 
@@ -410,10 +414,6 @@ model Lagerbewegung {
   @@map("lagerbewegung")
 }
 
-// A56 (Grill-Me-Entscheidung, 15.08.2026): KORREKTUR ersetzt durch zwei
-// gerichtete Werte statt einer Vorzeichen-Ausnahme bei "menge" — hält
-// "menge immer positiv"-Prinzip konsistent für künftiges Reporting
-// (siehe Master-Dokument Abschnitt 8, Punkt 5: Ad-hoc-Auswertungen).
 enum LagerbewegungTyp {
   WARENEINGANG
   WARENAUSGANG
@@ -423,7 +423,7 @@ enum LagerbewegungTyp {
 }
 
 // ---------------------------------------------------------------
-// CRM — Block B (A121): Kontakt/Lead
+// CRM — Block B: Kontakt/Lead + Aktivitäten/Wiedervorlagen/Angebote
 // ---------------------------------------------------------------
 model CrmKontakt {
   id             String       @id @default(uuid())
@@ -460,9 +460,6 @@ enum CrmPipelineStatus {
   VERLOREN
 }
 
-// ---------------------------------------------------------------
-// CRM — Block B (A125): Aktivitäten/Notizen
-// ---------------------------------------------------------------
 model CrmAktivitaet {
   id             String       @id @default(uuid())
   lizenznehmerId String
@@ -480,9 +477,6 @@ model CrmAktivitaet {
   @@map("crm_aktivitaet")
 }
 
-// ---------------------------------------------------------------
-// CRM — Block B (A126): Wiedervorlagen/Aufgaben
-// ---------------------------------------------------------------
 model CrmWiedervorlage {
   id             String       @id @default(uuid())
   lizenznehmerId String
@@ -503,9 +497,6 @@ model CrmWiedervorlage {
   @@map("crm_wiedervorlage")
 }
 
-// ---------------------------------------------------------------
-// CRM — Block B (A128): Angebote/Deals
-// ---------------------------------------------------------------
 model CrmAngebot {
   id             String       @id @default(uuid())
   lizenznehmerId String
@@ -554,23 +545,7 @@ model CrmAngebotPosition {
 }
 
 // ---------------------------------------------------------------
-// HR — Block C (A134): Mitarbeiter-Stammdaten
-// GEÄNDERT (Admin-Entscheidung, 26.08.2026): einzelnes "gehalt"-Feld
-// ersetzt durch Vergütungsart + Betrag + optionale Provision.
-// - verguetungsArt: TAGESLOHN oder MONATSGEHALT — GENAU EINE Basis-Art
-//   pro Mitarbeiter (kein gleichzeitiges Sowohl-als-auch).
-// - verguetungsBetrag: der zugehörige Betrag (Tagessatz ODER
-//   Monatsgehalt, je nach verguetungsArt).
-// - provisionBetrag: OPTIONAL zusätzlich zur Basis-Art. Bewusst als
-//   reines Betragsfeld OHNE Berechnungslogik (Admin-Entscheidung,
-//   26.08.2026) — keine Prozent-/Umsatzkopplung im System, kann bei
-//   Bedarf später als Erweiterung ergänzt werden (3.4).
-// Beide Felder bleiben reine Referenzwerte — KEINE Berechnungslogik
-// im System (Payroll-Klärung, Master-Dokument Abschnitt 6, Punkt 1:
-// volle Lohn-/Gehaltsabrechnung gehört nicht ins Q7-ERP).
-// Währung: Marokkanischer Dirham (DH) — nur Anzeige-Konvention im
-// Frontend, kein eigenes Währungsfeld in der Datenbank nötig, da
-// Q7-ERP aktuell nur für einen Standort/eine Währung ausgelegt ist.
+// HR — Block C: Mitarbeiter-Stammdaten, Zeiterfassung, Vorschuss
 // ---------------------------------------------------------------
 model Mitarbeiter {
   id             String       @id @default(uuid())
@@ -600,17 +575,6 @@ enum VerguetungsArt {
   MONATSGEHALT
 }
 
-// ---------------------------------------------------------------
-// HR — Block C (A138): Zeiterfassung (Arbeitstage)
-// GEÄNDERT (A147, 27.08.2026): Feld "gearbeitet" ergänzt — bisher
-// bedeutete "Eintrag existiert" automatisch "gearbeitet". Für den
-// Anwendungsfall "Fehltag dokumentieren" (z.B. Mitarbeiter nicht
-// auf der Baustelle erschienen) muss das explizit als eigener
-// Eintrag mit gearbeitet=false erfasst werden können — sonst wäre
-// ein Fehltag nicht von "noch keine Meldung erhalten" unterscheidbar.
-// Default true, damit bestehende Alt-Einträge (vor A147) korrekt
-// als "gearbeitet" interpretiert werden.
-// ---------------------------------------------------------------
 model Arbeitstag {
   id             String       @id @default(uuid())
   lizenznehmerId String // redundant mitgeführt für RLS (siehe 3.6)
@@ -620,7 +584,7 @@ model Arbeitstag {
   mitarbeiter   Mitarbeiter @relation(fields: [mitarbeiterId], references: [id])
 
   datum      DateTime @db.Date
-  gearbeitet Boolean  @default(true) // NEU (A147): true = Häkchen, false = X (Fehltag)
+  gearbeitet Boolean  @default(true) // A147: true = Häkchen, false = X (Fehltag)
   bemerkung  String?
 
   erstelltAm DateTime @default(now())
@@ -631,9 +595,6 @@ model Arbeitstag {
   @@map("arbeitstag")
 }
 
-// ---------------------------------------------------------------
-// HR — Block C (A140): Vorschuss-Erfassung
-// ---------------------------------------------------------------
 model Vorschuss {
   id             String       @id @default(uuid())
   lizenznehmerId String // redundant mitgeführt für RLS (siehe 3.6)
@@ -651,4 +612,177 @@ model Vorschuss {
   @@index([lizenznehmerId])
   @@index([mitarbeiterId])
   @@map("vorschuss")
+}
+
+// ---------------------------------------------------------------
+// E-COMMERCE / FULFILLMENT — Block D, Aufgabe D02
+// Grundlage: Q7ERP_Konzept_ModulKonfiguration_v1.md (Grill-Me D01,
+// Verdict PROCEED, 17.09.2026). Siehe Kommentare dort für die
+// Begründung jeder Entscheidung; hier nur Kurzfassung.
+// ---------------------------------------------------------------
+model LizenznehmerModul {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  modulTyp ModulTyp
+  aktiv    Boolean  @default(false)
+
+  aktiviertAm    DateTime?
+  erstelltAm     DateTime  @default(now())
+  aktualisiertAm DateTime  @updatedAt
+
+  @@unique([lizenznehmerId, modulTyp])
+  @@index([lizenznehmerId])
+  @@map("lizenznehmer_modul")
+}
+
+enum ModulTyp {
+  LOGISTIK
+  ZAHLUNG
+  SHOP
+}
+
+model ZahlungKonfiguration {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  adapterName  String // z.B. "cod" (MVP)
+  zugangsdaten Json?
+
+  aktiv          Boolean  @default(true) // Deaktivierung: nur false setzen, nicht löschen
+  erstelltAm     DateTime @default(now())
+  aktualisiertAm DateTime @updatedAt
+
+  @@index([lizenznehmerId])
+  @@map("zahlung_konfiguration")
+}
+
+model LogistikKonfiguration {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  adapterName   String  // z.B. "dhl"
+  apiSchluessel String? // verschlüsselt (VerschluesselungService)
+  zugangsdaten  Json?
+
+  aktiv          Boolean  @default(true)
+  erstelltAm     DateTime @default(now())
+  aktualisiertAm DateTime @updatedAt
+
+  @@index([lizenznehmerId])
+  @@map("logistik_konfiguration")
+}
+
+model ShopKonfiguration {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  adapterName   String  // z.B. "shopify", "woocommerce"
+  shopUrl       String?
+  apiSchluessel String? // verschlüsselt (VerschluesselungService)
+  zugangsdaten  Json?
+
+  aktiv          Boolean  @default(true)
+  erstelltAm     DateTime @default(now())
+  aktualisiertAm DateTime @updatedAt
+
+  @@index([lizenznehmerId])
+  @@map("shop_konfiguration")
+}
+
+// ---------------------------------------------------------------
+// E-COMMERCE / FULFILLMENT — Block D, Aufgabe D04
+// Grundlage: Q7ERP_Konzept_Bestellung_v1.md (Grill-Me D03, Verdict
+// PROCEED, 18.09.2026).
+//
+// Kunde: inline auf Bestellung (kein CrmKontakt-Bezug, D03 Entsch. 1)
+// — bewusste Trennung von Vertriebs-Leads.
+//
+// Zahlung/Logistik: Snapshot statt Live-FK zu den D02-Konfigurations-
+// tabellen (D03 Entsch. 2) — Bestellhistorie bleibt unveränderlich,
+// auch wenn eine Konfiguration später geändert/deaktiviert wird.
+//
+// Status: festes Enum, bewusst KEINE konfigurierbare Pipeline wie im
+// CRM-Modul (D03 Entsch. 3) — Fulfillment-Status ist mandanten-
+// unabhängig universell, anders als eine Vertriebspipeline.
+//
+// Lager-Kopplung: kein Schema-Aspekt. BestellungService (D05) muss
+// LagerService.warenausgangBuchen() sauber aufrufen, keine eigene
+// Lager-Logik/direkter Tabellenzugriff (D03 Entsch. 4, hält 3.2 ein).
+//
+// mwstSatz: pro Position, nicht nur auf Bestellebene (D03 Entsch. 5)
+// — vermeidet Probleme bei gemischt besteuerten Bestellungen.
+// ---------------------------------------------------------------
+model Bestellung {
+  id             String       @id @default(uuid())
+  lizenznehmerId String
+  lizenznehmer   Lizenznehmer @relation(fields: [lizenznehmerId], references: [id])
+
+  quelle           String  // z.B. "manuell", "shop", "facebook", "whatsapp"
+  externeBestellId String? // gesetzt bei Shop-Import (D19/D20), sonst NULL bei manueller Erfassung
+
+  status BestellStatus @default(NEU)
+
+  // Kunde — bewusst inline, kein CrmKontakt-Bezug (D03 Entsch. 1)
+  kundeName    String
+  kundeTelefon String?
+  kundeAdresse String?
+
+  // Zahlung — Snapshot, keine Live-FK zu ZahlungKonfiguration (D03 Entsch. 2)
+  zahlartAdapterName String // z.B. "cod"
+
+  // Logistik — Snapshot, keine Live-FK zu LogistikKonfiguration (D03 Entsch. 2)
+  carrierAdapterName String? // gesetzt sobald Versand ausgelöst wurde (D11)
+  sendungsnummer     String? // von Carrier-API erhalten (D11)
+
+  lagerortId String?
+  lagerort   Lagerort? @relation(fields: [lagerortId], references: [id])
+
+  // D05: bewusst beide Werte gespeichert statt einer Einstellung
+  // (Netto vs. Brutto) — hält die Bestellhistorie eindeutig (D03,
+  // Entscheidung 2: Snapshot-Prinzip), ohne dass künftig eine
+  // Einstellungsänderung die Interpretation alter Bestellungen
+  // in Frage stellt. Berechnet aus mwstSatz je BestellPosition.
+  gesamtbetragNetto  Decimal @db.Decimal(12, 2)
+  gesamtbetragBrutto Decimal @db.Decimal(12, 2)
+
+  positionen BestellPosition[]
+
+  erstelltAm     DateTime @default(now())
+  aktualisiertAm DateTime @updatedAt
+
+  @@index([lizenznehmerId])
+  @@index([lizenznehmerId, status])
+  @@map("bestellung")
+}
+
+enum BestellStatus {
+  NEU
+  IN_BEARBEITUNG
+  VERSANDT
+  ABGESCHLOSSEN
+  STORNIERT
+}
+
+model BestellPosition {
+  id             String @id @default(uuid())
+  lizenznehmerId String // redundant mitgeführt für RLS (siehe 3.6)
+
+  bestellungId String
+  bestellung   Bestellung @relation(fields: [bestellungId], references: [id])
+
+  artikelId String
+  artikel   Artikel @relation(fields: [artikelId], references: [id])
+
+  menge       Decimal @db.Decimal(12, 3)
+  einzelpreis Decimal @db.Decimal(12, 2)
+  mwstSatz    Decimal @db.Decimal(5, 2) // D03 Entsch. 5 — pro Position, nicht nur auf Bestellebene
+
+  @@index([lizenznehmerId])
+  @@index([bestellungId])
+  @@map("bestell_position")
 }

@@ -18,6 +18,7 @@ import { MitarbeiterModule } from './mitarbeiter/mitarbeiter.module'; // NEU (A1
 import { ZeiterfassungModule } from './zeiterfassung/zeiterfassung.module'; // NEU (A138)
 import { VorschussModule } from './vorschuss/vorschuss.module'; // NEU (A140)
 import { EinkaufModule } from './einkauf/einkauf.module'; // NEU (A148)
+import { BestellungModule } from './bestellung/bestellung.module'; // NEU (D05, Block D E-Commerce/Fulfillment)
 import { TenancyMiddleware } from './common/tenancy/tenancy.middleware';
 
 @Module({
@@ -63,6 +64,10 @@ import { TenancyMiddleware } from './common/tenancy/tenancy.middleware';
     // NEU (A148): Einkauf-Endpunkte (Bestellvorschlag) — läuft normal durch
     // TenancyMiddleware, kein Exclude-Eintrag nötig.
     EinkaufModule,
+    // NEU (D05, Block D E-Commerce/Fulfillment): Bestellung-Endpunkte —
+    // läuft normal durch TenancyMiddleware (Standard-Tenant-Pattern wie
+    // KontoModule/CRM-Module), kein Exclude-Eintrag nötig.
+    BestellungModule,
   ],
   controllers: [AppController],
   providers: [AppService],
