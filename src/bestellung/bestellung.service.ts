@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { BestellStatus } from '@prisma/client';
 import { PrismaTenantService } from '../common/tenancy/prisma-tenant.service';
 import { CreateBestellungDto } from './dto/create-bestellung.dto';
 import { UpdateBestellungStatusDto } from './dto/update-bestellung-status.dto';
@@ -84,13 +85,24 @@ export class BestellungService extends PrismaTenantService {
   /**
    * Holt alle Bestellungen des aktuellen Lizenznehmers, optional gefiltert
    * nach Status. Neueste zuerst.
+   *
+   * status wird gegen das von Prisma generierte BestellStatus-Enum
+   * validiert, bevor es in die Query geht — verhindert sowohl den
+   * TypeScript-Typkonflikt als auch eine stille Fehlabfrage bei einem
+   * Tippfehler im Query-Parameter.
    */
   async findAll(lizenznehmerId: string, status?: string) {
     return this.withTenantContext(async (prisma) => {
+      if (status && !Object.values(BestellStatus).includes(status as BestellStatus)) {
+        throw new BadRequestException(
+          `Ungültiger Status "${status}". Gültige Werte: ${Object.values(BestellStatus).join(', ')}.`,
+        );
+      }
+
       return prisma.bestellung.findMany({
         where: {
           lizenznehmerId,
-          ...(status ? { status } : {}),
+          ...(status ? { status: status as BestellStatus } : {}),
         },
         include: { positionen: true },
         orderBy: { erstelltAm: 'desc' },
